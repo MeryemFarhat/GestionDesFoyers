@@ -105,11 +105,15 @@ class GestionFoyerApplicationTests {
         etudiants.addEtudiants(LongStream.rangeClosed(200001, 200007).mapToObj(this::student).toList());
         var first = reservations.ajouterReservation(idBloc, 200001);
         assertThat(first.isEstValide()).isTrue();
-        assertThat(first.getIdReservation()).startsWith("400-Bloc Reservations-");
+        int year = AcademicYear.current().getYear();
+        assertThat(first.getIdReservation()).isEqualTo("400-Bloc Reservations-" + year + "-" + (year + 1));
+        assertThat(first.getEtudiants()).extracting(Etudiant::getCin).containsExactly(200001L);
         assertThatThrownBy(() -> reservations.ajouterReservation(idBloc, 200001))
                 .isInstanceOf(FoyerException.class).hasMessageContaining("deja");
         var shared = reservations.ajouterReservation(idBloc, 200002);
         assertThat(shared.getIdReservation()).startsWith("401-Bloc Reservations-");
+        assertThat(chambres.getChambresNonReserveParNomUniversiteEtTypeChambre(
+                universite.getNomUniversite(), TypeChambre.DOUBLE)).isEmpty();
         assertThat(reservations.ajouterReservation(idBloc, 200003).getIdReservation()).isEqualTo(shared.getIdReservation());
         for (long cin = 200004; cin <= 200006; cin++) {
             assertThat(reservations.ajouterReservation(idBloc, cin).getIdReservation()).startsWith("402-Bloc Reservations-");
@@ -126,7 +130,19 @@ class GestionFoyerApplicationTests {
         var afterCancellation = reservations.annulerReservation(200002);
         assertThat(afterCancellation.isEstValide()).isTrue();
         assertThat(afterCancellation.getEtudiants()).extracting(Etudiant::getCin).containsExactly(200003L);
+        assertThat(jdbc.queryForObject("select count(*) from chambre_reservation where reservation_id = ?",
+                Integer.class, shared.getIdReservation())).isEqualTo(1);
         assertThat(reservations.annulerReservation(200003).isEstValide()).isFalse();
+        assertThat(jdbc.queryForObject("select count(*) from chambre_reservation where reservation_id = ?",
+                Integer.class, shared.getIdReservation())).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from reservation_etudiant where reservation_id = ?",
+                Integer.class, shared.getIdReservation())).isZero();
+        assertThat(reservations.retrieveReservation(shared.getIdReservation()).isEstValide()).isFalse();
+        assertThatThrownBy(() -> reservations.annulerReservation(200003))
+                .isInstanceOf(FoyerException.class).hasMessageContaining("Reservation active");
+        assertThat(reservations.getReservationParAnneeUniversitaireEtNomUniversite(
+                AcademicYear.toDate(AcademicYear.current()), universite.getNomUniversite()))
+                .extracting(Reservation::getIdReservation).doesNotContain(shared.getIdReservation());
         assertThat(chambres.getChambresNonReserveParNomUniversiteEtTypeChambre(universite.getNomUniversite(), TypeChambre.DOUBLE))
                 .hasSize(1);
         assertThat(reservations.ajouterReservation(idBloc, 200007).getIdReservation()).isEqualTo(shared.getIdReservation());
@@ -173,6 +189,69 @@ class GestionFoyerApplicationTests {
             assertThat(exception).hasMessageContaining("Aucune place");
             return false;
         }
+    }
+
+    @Test
+    void filtersByUniversityTypeAndAcademicYearBoundaries() {
+        long chambre = roomInUniversity("Periode A", 601, TypeChambre.DOUBLE);
+        long autre = roomInUniversity("Periode B", 602, TypeChambre.DOUBLE);
+        roomInUniversity("Periode A", 603, TypeChambre.SIMPLE);
+        LocalDate debut = AcademicYear.current();
+        addDatedReservation(chambre, "periode-avant", debut.minusDays(1));
+        addDatedReservation(autre, "periode-autre-universite", debut);
+        addDatedReservation(chambre, "periode-apres", debut.plusYears(1));
+        assertThat(chambres.getChambresNonReserveParNomUniversiteEtTypeChambre("Periode A", TypeChambre.DOUBLE))
+                .extracting(Chambre::getNumeroChambre).containsExactly(601L);
+
+        addDatedReservation(chambre, "periode-debut", debut);
+        addDatedReservation(chambre, "periode-fin", debut.plusYears(1).minusDays(1));
+        assertThat(reservations.getReservationParAnneeUniversitaireEtNomUniversite(
+                AcademicYear.toDate(debut.plusMonths(5)), "Periode A"))
+                .extracting(Reservation::getIdReservation).containsExactly("periode-debut", "periode-fin");
+        assertThat(chambres.getChambresNonReserveParNomUniversiteEtTypeChambre("Periode A", TypeChambre.DOUBLE))
+                .isEmpty();
+    }
+
+    @Test
+    void advancedEndpointsValidateParametersAndDocumentExamples() {
+        RestClient client = RestClient.create("http://localhost:" + port);
+        assertThatThrownBy(() -> client.post().uri("/api/reservations?idBloc=0&cinEtudiant=12345678")
+                .retrieve().toBodilessEntity()).isInstanceOf(HttpClientErrorException.BadRequest.class);
+        assertThatThrownBy(() -> client.delete().uri("/api/reservations/etudiants/99999999")
+                .retrieve().toBodilessEntity()).isInstanceOf(HttpClientErrorException.NotFound.class);
+        assertThatThrownBy(() -> client.get().uri("/api/reservations/par-annee-et-universite?anneeUniversite=2026&nomUniversite=Inconnue")
+                .retrieve().toBodilessEntity()).isInstanceOf(HttpClientErrorException.BadRequest.class);
+        assertThatThrownBy(() -> client.get().uri("/api/chambres/non-reservees?nomUniversite=Inconnue&type=DOUBLE")
+                .retrieve().toBodilessEntity()).isInstanceOf(HttpClientErrorException.NotFound.class);
+        assertThat(client.get().uri("/v3/api-docs").retrieve().body(String.class))
+                .contains("12345678", "2026-11-26", "Universite Demo",
+                        "/api/reservations/etudiants/{cinEtudiant}", "/api/chambres/non-reservees");
+    }
+
+    private long roomInUniversity(String nom, long numero, TypeChambre type) {
+        var universite = universites.retrieveAllUniversities().stream()
+                .filter(candidate -> nom.equals(candidate.getNomUniversite())).findFirst()
+                .orElseGet(() -> university(nom));
+        var foyer = universite.getFoyer();
+        if (foyer == null) {
+            foyer = foyers.ajouterFoyerEtAffecterAUniversite(foyer(nom), universite.getIdUniversite());
+        }
+        Bloc bloc = new Bloc();
+        bloc.setNomBloc(nom + " " + numero);
+        bloc.setCapaciteBloc(10);
+        long idBloc = blocs.addBloc(bloc).getIdBloc();
+        blocs.affecterBlocAFoyer(idBloc, foyer.getIdFoyer());
+        Chambre chambre = new Chambre();
+        chambre.setNumeroChambre(numero);
+        chambre.setTypeC(type);
+        long idChambre = chambres.addChambre(chambre).getIdChambre();
+        blocs.affecterChambresABloc(List.of(numero), idBloc);
+        return idChambre;
+    }
+
+    private void addDatedReservation(long idChambre, String id, LocalDate date) {
+        jdbc.update("insert into reservation (id_reservation, annee_universitaire, est_valide) values (?, ?, true)", id, date);
+        jdbc.update("insert into chambre_reservation (chambre_id, reservation_id) values (?, ?)", idChambre, id);
     }
 
     private Universite university(String nom) {

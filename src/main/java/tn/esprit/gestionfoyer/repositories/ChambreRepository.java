@@ -31,9 +31,9 @@ public interface ChambreRepository extends JpaRepository<Chambre, Long> {
             and (:type is null or c.typeC = :type)
             and not exists (
                 select r from Chambre candidate join candidate.reservations r
-                where candidate = c and r.estValide = true and r.anneeUniversitaire = :annee
+                where candidate = c and r.estValide = true and r.anneeUniversitaire >= :debut and r.anneeUniversitaire < :fin
             )
             order by u.nomUniversite, c.numeroChambre
             """)
-    List<Chambre> findUnreserved(String nom, TypeChambre type, Date annee);
+    List<Chambre> findUnreserved(String nom, TypeChambre type, Date debut, Date fin);
 }

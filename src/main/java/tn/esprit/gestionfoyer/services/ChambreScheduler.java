@@ -18,7 +18,8 @@ public class ChambreScheduler {
     @Transactional(readOnly = true)
     public void afficherChambresNonReservees() {
         var current = AcademicYear.current();
-        var chambres = repository.findUnreserved(null, null, AcademicYear.toDate(current));
+        var chambres = repository.findUnreserved(null, null,
+                AcademicYear.toDate(current), AcademicYear.toDate(current.plusYears(1)));
         log.info("{} chambre(s) non reservee(s) pour l'annee {}-{}", chambres.size(), current.getYear(), current.getYear() + 1);
         for (var chambre : chambres) {
             var bloc = chambre.getBloc();

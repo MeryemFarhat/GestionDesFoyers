@@ -68,9 +68,23 @@ Invoke-RestMethod -Method Delete -Uri "$api/reservations/etudiants/12345678"
 
 ## Business rules
 
-- The academic year starts September 1 in Africa/Tunis. The stored date is the start of the academic year, and the lookup accepts any date within that year.
+- The academic year starts September 1 in Africa/Tunis. New records store the start of the academic year. The lookup accepts any date within that year and filters stored dates from September 1 inclusive to the following September 1 exclusive.
 - A room has one reservation record per academic year, for example `102-Bloc Demo-2026-2027`. Room numbers, block names, university names and student CINs are unique to keep identification and assignment unambiguous. Allocation picks the lowest room ID with available capacity. Foyer and block capacities are descriptive, while room type enforces occupancy.
-- Cancelling by CIN releases the student's current-year place. The reservation remains valid while another student occupies it. An empty reservation is retained as invalid and reused on the next booking for that room and year. An unreserved room has zero active occupants. The reservation-year lookup includes invalid records.
-- Reservation PUT takes `{"estValide":false}` to release the sole occupant of a reservation. An optional `anneeUniversitaire` must match the stored date. Shared reservations require individual cancellation. Booking reactivates an empty reservation. Room number, block name, and room-to-block assignment are protected once there is reservation history.
-- To delete a foyer, first detach its university and blocks. Blocks with reservation history and students still linked to a reservation are protected from deletion.
+- Cancelling by CIN releases the student's current-year place. The reservation remains valid while another student occupies it. When the last student leaves, the reservation is invalidated and detached from the room. Its row is retained and reused by ID on the next booking for that room and year. An unreserved room has no active reservation during the current academic year, so a partially occupied room is excluded. The university lookup follows the room association and therefore excludes detached records. The cancellation operation preserves active shared reservations until the last occupant leaves.
+- Reservation PUT takes `{"estValide":false}` to release the sole occupant of a reservation. An optional `anneeUniversitaire` must match the stored date. Shared reservations require individual cancellation. Booking reactivates an empty reservation. Room number, block name, and room-to-block assignment are protected while room reservations are linked.
+- To delete a foyer, first detach its university and blocks. Blocks and students with linked reservations are protected from deletion.
 - The scheduler logs unreserved rooms across universities. Configure `foyer.scheduler.interval-ms` and `foyer.scheduler.initial-delay-ms` in properties or use `FOYER_SCHEDULER_INTERVAL_MS` and `FOYER_SCHEDULER_INITIAL_DELAY_MS`. The timing aspect logs reservation creation duration.
+
+### Tester les quatre services dans Swagger
+
+Dans le profil `dev`, utiliser `Universite Demo`, les CIN `12345678` et `12345679`, et relever l'identifiant de `Bloc Demo` via `GET /api/blocs` (souvent `1`). Effectuer la création avant l'annulation.
+
+| Methode | Chemin et exemple |
+| --- | --- |
+| POST | `/api/reservations?idBloc=1&cinEtudiant=12345678` |
+| DELETE | `/api/reservations/etudiants/12345678`, parametre de chemin `cinEtudiant` |
+| GET | `/api/reservations/par-annee-et-universite?anneeUniversite=2026-11-26&nomUniversite=Universite%20Demo` |
+| GET | `/api/chambres/non-reservees?nomUniversite=Universite%20Demo&type=DOUBLE` |
+
+Pour la recherche par annee, remplacer la date par une date de l'annee universitaire souhaitee.
+La consigne de recherche des chambres mentionne le foyer. La signature impose `nomUniversite`, donc le filtre porte sur le nom unique de l'universite.

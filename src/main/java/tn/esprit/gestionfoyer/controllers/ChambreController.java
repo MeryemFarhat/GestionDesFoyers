@@ -1,5 +1,7 @@
 package tn.esprit.gestionfoyer.controllers;
 
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import lombok.RequiredArgsConstructor;
@@ -53,8 +55,13 @@ public class ChambreController {
         return service.getChambresParBlocEtTypeJpql(idBloc, type);
     }
 
+    @Operation(summary = "Rechercher les chambres non réservées",
+            description = "Retourne les chambres du type demandé sans réservation active pendant l'année universitaire actuelle. Le nom demandé est celui de l'université.")
     @GetMapping("/non-reservees")
-    public List<Chambre> nonReservees(@RequestParam @NotBlank String nomUniversite, @RequestParam TypeChambre type) {
+    public List<Chambre> nonReservees(
+            @Parameter(description = "Nom unique de l'université", example = "Universite Demo")
+            @RequestParam @NotBlank String nomUniversite,
+            @Parameter(description = "Type de chambre", example = "DOUBLE") @RequestParam TypeChambre type) {
         return service.getChambresNonReserveParNomUniversiteEtTypeChambre(nomUniversite, type);
     }
 }

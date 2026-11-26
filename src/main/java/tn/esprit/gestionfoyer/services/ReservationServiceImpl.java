@@ -36,10 +36,13 @@ public class ReservationServiceImpl implements ReservationService {
 
     @Override
     public Reservation updateReservation(Reservation res) {
-        lockChambre(res.getIdReservation());
+        var chambre = repository.findChambreId(res.getIdReservation()).map(this::lockChambre);
         Reservation reservation = retrieveReservation(res.getIdReservation());
         if (res.getAnneeUniversitaire() != null && !reservation.getAnneeUniversitaire().equals(res.getAnneeUniversitaire())) {
             throw conflict("L'annee universitaire fait partie de l'identifiant");
+        }
+        if (chambre.isEmpty() && reservation.isEstValide()) {
+            throw conflict("La reservation vient d'etre reaffectee. Reessayez la modification");
         }
         if (res.isEstValide() && !reservation.isEstValide()) {
             throw conflict("Une reservation vide doit etre reactivee par une nouvelle inscription");
@@ -48,8 +51,12 @@ public class ReservationServiceImpl implements ReservationService {
             if (reservation.getEtudiants().size() > 1) {
                 throw conflict("Annulez les places individuellement pour une chambre partagee");
             }
-            reservation.getEtudiants().stream().findFirst().ifPresent(etudiant -> releasePlace(reservation, etudiant));
-            reservation.setEstValide(false);
+            Chambre room = chambre.orElseThrow(() -> missing("Chambre de la reservation", res.getIdReservation()));
+            if (reservation.getEtudiants().isEmpty()) {
+                detachEmptyReservation(room, reservation);
+            } else {
+                releasePlace(room, reservation, reservation.getEtudiants().iterator().next());
+            }
         }
         return reservation;
     }
@@ -61,19 +68,24 @@ public class ReservationServiceImpl implements ReservationService {
         Bloc bloc = blocRepository.lockById(idBloc).orElseThrow(() -> missing("Bloc", idBloc));
         LocalDate start = AcademicYear.current();
         Date annee = AcademicYear.toDate(start);
-        if (repository.findActiveByEtudiant(etudiant.getIdEtudiant(), annee).isPresent()) {
+        Date fin = AcademicYear.toDate(start.plusYears(1));
+        if (repository.findActiveByEtudiant(etudiant.getIdEtudiant(), annee, fin).isPresent()) {
             throw conflict("Cet etudiant a deja une reservation active cette annee");
         }
 
         for (Chambre chambre : chambreRepository.findByBlocIdBlocOrderByIdChambre(idBloc)) {
             Reservation reservation = chambre.getReservations().stream()
-                    .filter(r -> r.getAnneeUniversitaire().equals(annee)).findFirst().orElse(null);
+                    .filter(r -> !r.getAnneeUniversitaire().before(annee) && r.getAnneeUniversitaire().before(fin))
+                    .findFirst().orElse(null);
             if (reservation == null) {
-                reservation = new Reservation();
-                reservation.setIdReservation(chambre.getNumeroChambre() + "-" + bloc.getNomBloc()
-                        + "-" + start.getYear() + "-" + (start.getYear() + 1));
-                reservation.setAnneeUniversitaire(annee);
-                reservation = repository.save(reservation);
+                String id = chambre.getNumeroChambre() + "-" + bloc.getNomBloc()
+                        + "-" + start.getYear() + "-" + (start.getYear() + 1);
+                reservation = repository.findById(id).orElseGet(() -> {
+                    Reservation nouvelle = new Reservation();
+                    nouvelle.setIdReservation(id);
+                    nouvelle.setAnneeUniversitaire(annee);
+                    return repository.save(nouvelle);
+                });
                 chambre.getReservations().add(reservation);
             }
             if (reservation.getEtudiants().size() < chambre.getTypeC().capacity()) {
@@ -90,21 +102,31 @@ public class ReservationServiceImpl implements ReservationService {
     public Reservation annulerReservation(long cinEtudiant) {
         Etudiant etudiant = etudiantRepository.findByCin(cinEtudiant)
                 .orElseThrow(() -> missing("Etudiant CIN", cinEtudiant));
-        String id = repository.findActiveByEtudiant(etudiant.getIdEtudiant(), AcademicYear.toDate(AcademicYear.current()))
+        LocalDate start = AcademicYear.current();
+        String id = repository.findActiveByEtudiant(etudiant.getIdEtudiant(),
+                        AcademicYear.toDate(start), AcademicYear.toDate(start.plusYears(1)))
                 .orElseThrow(() -> missing("Reservation active pour CIN", cinEtudiant));
-        lockChambre(id);
+        Chambre chambre = repository.findChambreId(id).map(this::lockChambre)
+                .orElseThrow(() -> missing("Reservation active pour CIN", cinEtudiant));
         Reservation reservation = retrieveReservation(id);
         if (!reservation.getEtudiants().contains(etudiant)) {
             throw missing("Reservation active pour CIN", cinEtudiant);
         }
-        releasePlace(reservation, etudiant);
+        releasePlace(chambre, reservation, etudiant);
         return reservation;
     }
 
-    private void releasePlace(Reservation reservation, Etudiant etudiant) {
+    private void releasePlace(Chambre chambre, Reservation reservation, Etudiant etudiant) {
         reservation.getEtudiants().remove(etudiant);
         etudiant.getReservations().remove(reservation);
-        reservation.setEstValide(!reservation.getEtudiants().isEmpty());
+        if (reservation.getEtudiants().isEmpty()) {
+            detachEmptyReservation(chambre, reservation);
+        }
+    }
+
+    private void detachEmptyReservation(Chambre chambre, Reservation reservation) {
+        reservation.setEstValide(false);
+        chambre.getReservations().remove(reservation);
     }
 
     @Override
@@ -112,13 +134,12 @@ public class ReservationServiceImpl implements ReservationService {
     public List<Reservation> getReservationParAnneeUniversitaireEtNomUniversite(Date anneeUniversite, String nomUniversite) {
         universiteRepository.findByNomUniversite(nomUniversite)
                 .orElseThrow(() -> missing("Universite", nomUniversite));
-        Date start = AcademicYear.toDate(AcademicYear.start(AcademicYear.toLocalDate(anneeUniversite)));
-        return repository.findByAnneeEtUniversite(start, nomUniversite);
+        LocalDate start = AcademicYear.start(AcademicYear.toLocalDate(anneeUniversite));
+        return repository.findByAnneeEtUniversite(
+                AcademicYear.toDate(start), AcademicYear.toDate(start.plusYears(1)), nomUniversite);
     }
 
-    private void lockChambre(String reservationId) {
-        long idChambre = repository.findChambreId(reservationId)
-                .orElseThrow(() -> missing("Reservation", reservationId));
-        chambreRepository.lockById(idChambre).orElseThrow(() -> missing("Chambre", idChambre));
+    private Chambre lockChambre(long idChambre) {
+        return chambreRepository.lockById(idChambre).orElseThrow(() -> missing("Chambre", idChambre));
     }
 }

@@ -38,9 +38,11 @@ public class ChambreServiceImpl implements ChambreService {
         if (entity.getNumeroChambre() != c.getNumeroChambre() && !entity.getReservations().isEmpty()) {
             throw conflict("Une chambre avec des reservations ne peut pas etre renumerotee");
         }
-        Date currentYear = AcademicYear.toDate(AcademicYear.current());
+        var start = AcademicYear.current();
+        Date currentYear = AcademicYear.toDate(start);
+        Date nextYear = AcademicYear.toDate(start.plusYears(1));
         if (entity.getReservations().stream().anyMatch(r -> r.isEstValide()
-                && r.getAnneeUniversitaire().equals(currentYear)
+                && !r.getAnneeUniversitaire().before(currentYear) && r.getAnneeUniversitaire().before(nextYear)
                 && r.getEtudiants().size() > c.getTypeC().capacity())) {
             throw conflict("La capacite est inferieure au nombre de reservations actives");
         }
@@ -80,7 +82,9 @@ public class ChambreServiceImpl implements ChambreService {
     @Transactional(readOnly = true)
     public List<Chambre> getChambresNonReserveParNomUniversiteEtTypeChambre(String nomUniversite, TypeChambre type) {
         requireUniversity(nomUniversite);
-        return repository.findUnreserved(nomUniversite, type, AcademicYear.toDate(AcademicYear.current()));
+        var start = AcademicYear.current();
+        return repository.findUnreserved(nomUniversite, type,
+                AcademicYear.toDate(start), AcademicYear.toDate(start.plusYears(1)));
     }
 
     private void requireBloc(long id) {
